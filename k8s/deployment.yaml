@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rcb-monitor
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rcb-monitor
+  template:
+    metadata:
+      labels:
+        app: rcb-monitor
+    spec:
+      containers:
+        - name: rcb-monitor
+          image: srvyshak/rcb-monitor:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: TARGET_URL
+              value: "https://shop.royalchallengers.com/ticket"
+            - name: CHECK_INTERVAL
+              value: "60"
+            - name: PORT
+              value: "8080"
+            - name: GMAIL_ADDRESS
+              valueFrom:
+                secretKeyRef:
+                  name: rcb-monitor-secrets
+                  key: GMAIL_ADDRESS
+            - name: GMAIL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rcb-monitor-secrets
+                  key: GMAIL_APP_PASSWORD
+            - name: NOTIFY_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: rcb-monitor-secrets
+                  key: NOTIFY_EMAIL
+            - name: TEXTMEBOT_PHONE
+              valueFrom:
+                secretKeyRef:
+                  name: rcb-monitor-secrets
+                  key: TEXTMEBOT_PHONE
+            - name: TEXTMEBOT_APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: rcb-monitor-secrets
+                  key: TEXTMEBOT_APIKEY
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 60
