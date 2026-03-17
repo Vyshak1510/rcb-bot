@@ -7,6 +7,9 @@ import logging
 import hashlib
 import smtplib
 import argparse
+import threading
+import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -147,6 +150,63 @@ def playwright_check(url: str, browser) -> dict:
         context.close()
 
 
+# --- Health check server ---
+
+# Shared state for the health server to read
+health_state = {
+    "status": "starting",
+    "cycle": 0,
+    "last_check": None,
+    "page_state": "not_live",
+    "uptime_start": time.time(),
+}
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            uptime = int(time.time() - health_state["uptime_start"])
+            payload = {
+                "status": health_state["status"],
+                "cycle": health_state["cycle"],
+                "last_check": health_state["last_check"],
+                "page_state": health_state["page_state"],
+                "uptime_seconds": uptime,
+                "target": TARGET_URL,
+            }
+            body = json.dumps(payload, indent=2).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path == "/test":
+            log.info("Test email triggered via /test endpoint")
+            ok = send_email(
+                "RCB Monitor - Health Check ✅",
+                f"Bot is alive and running!\n\nCycle: {health_state['cycle']}\nPage state: {health_state['page_state']}\nTarget: {TARGET_URL}"
+            )
+            body = json.dumps({"email_sent": ok}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Suppress default HTTP server logs
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    log.info("Health server running on port %d", port)
+    server.serve_forever()
+
+
 # --- Main loop ---
 
 def main():
@@ -163,6 +223,10 @@ def main():
         )
         log.info("Test complete.")
         return
+
+    # Start health check server in background thread
+    t = threading.Thread(target=start_health_server, daemon=True)
+    t.start()
 
     log.info("Starting RCB Ticket Monitor")
     log.info("Target: %s", TARGET_URL)
@@ -194,6 +258,10 @@ def main():
             current_interval = CHECK_INTERVAL
 
             try:
+                health_state["status"] = "running"
+                health_state["cycle"] = cycle
+                health_state["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
                 # --- Tier 1: Quick HTTP check ---
                 http = quick_http_check(TARGET_URL, cycle)
                 log.info("Cycle %d | HTTP %d | Size: %d bytes | Bundle: %s",
@@ -237,11 +305,13 @@ def main():
                                 )
                                 last_notified_at = notify(subject, body, last_notified_at)
                                 state = "live"
+                                health_state["page_state"] = "live"
                         else:
                             log.info("Page not live yet (no team names found)")
                             if state == "live":
                                 log.info("State changed back to not_live")
                                 state = "not_live"
+                                health_state["page_state"] = "not_live"
 
                     except Exception as e:
                         log.error("Playwright check failed: %s", e)
