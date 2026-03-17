@@ -207,8 +207,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
-        elif self.path == "/test":
-            log.info("Test notifications triggered via /test endpoint")
+        elif self.path == "/notify-test":
+            log.info("Test notifications triggered via /notify-test endpoint")
             msg = f"Bot is alive!\n\nCycle: {health_state['cycle']}\nPage state: {health_state['page_state']}\nTarget: {TARGET_URL}"
             email_ok = send_email("RCB Monitor - Health Check ✅", msg)
             wa_ok = send_whatsapp(f"RCB Monitor - Health Check ✅\n\n{msg}")
