@@ -28,6 +28,9 @@ GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "")
 
+TEXTMEBOT_PHONE = os.getenv("TEXTMEBOT_PHONE", "")
+TEXTMEBOT_APIKEY = os.getenv("TEXTMEBOT_APIKEY", "")
+
 # IPL opponent team cities to detect (case-insensitive)
 TEAM_NAMES = [
     "chennai", "delhi", "gujarat", "kolkata",
@@ -83,15 +86,37 @@ def send_email(subject: str, body: str) -> bool:
         return False
 
 
+def send_whatsapp(body: str) -> bool:
+    if not all([TEXTMEBOT_PHONE, TEXTMEBOT_APIKEY]):
+        log.warning("TextMeBot credentials not configured, skipping WhatsApp")
+        return False
+    try:
+        resp = requests.get(
+            "https://api.textmebot.com/send.php",
+            params={"recipient": TEXTMEBOT_PHONE, "apikey": TEXTMEBOT_APIKEY, "text": body},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            log.info("WhatsApp sent to %s", TEXTMEBOT_PHONE)
+            return True
+        log.error("WhatsApp send failed: HTTP %d %s", resp.status_code, resp.text)
+        return False
+    except Exception as e:
+        log.error("Failed to send WhatsApp: %s", e)
+        return False
+
+
 def notify(subject: str, body: str, last_notified_at: float) -> float:
-    """Send email notification. Returns updated last_notified_at."""
+    """Send all notifications. Returns updated last_notified_at."""
     now = time.time()
     if now - last_notified_at < NOTIFICATION_COOLDOWN:
         log.info("Notification cooldown active, skipping (%.0f min remaining)",
                  (NOTIFICATION_COOLDOWN - (now - last_notified_at)) / 60)
         return last_notified_at
 
-    if send_email(subject, body):
+    email_ok = send_email(subject, body)
+    wa_ok = send_whatsapp(f"{subject}\n\n{body}")
+    if email_ok or wa_ok:
         return now
     return last_notified_at
 
@@ -183,12 +208,11 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif self.path == "/test":
-            log.info("Test email triggered via /test endpoint")
-            ok = send_email(
-                "RCB Monitor - Health Check ✅",
-                f"Bot is alive and running!\n\nCycle: {health_state['cycle']}\nPage state: {health_state['page_state']}\nTarget: {TARGET_URL}"
-            )
-            body = json.dumps({"email_sent": ok}).encode()
+            log.info("Test notifications triggered via /test endpoint")
+            msg = f"Bot is alive!\n\nCycle: {health_state['cycle']}\nPage state: {health_state['page_state']}\nTarget: {TARGET_URL}"
+            email_ok = send_email("RCB Monitor - Health Check ✅", msg)
+            wa_ok = send_whatsapp(f"RCB Monitor - Health Check ✅\n\n{msg}")
+            body = json.dumps({"email_sent": email_ok, "whatsapp_sent": wa_ok}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
