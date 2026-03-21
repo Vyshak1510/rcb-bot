@@ -56,12 +56,18 @@ async function checkPage() {
   }
 }
 
-// Open the ticket page in a background tab so content.js can inspect the DOM
+// Open the ticket page in a hidden minimized window so content.js can inspect the DOM
+// without interrupting the user's current browsing
 function openCheckTab() {
-  chrome.tabs.create({ url: TARGET_URL, active: false }, (tab) => {
-    // content.js will handle detection and message us back
-    console.log("[RCB] Opened check tab:", tab.id);
-  });
+  chrome.windows.create(
+    { url: TARGET_URL, state: "minimized", focused: false },
+    (win) => {
+      const tabId = win.tabs[0].id;
+      console.log("[RCB] Opened hidden check tab:", tabId, "in window:", win.id);
+      // Store window ID so we can close the whole window when done
+      setState({ checkWindowId: win.id });
+    }
+  );
 }
 
 // ── Messages from content.js ──────────────────────────────────────────────────
@@ -72,8 +78,10 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 
   if (msg.type === "CHECK_TAB_CLEAN") {
-    // Page not live yet — close the background check tab silently
-    if (sender.tab?.id) chrome.tabs.remove(sender.tab.id);
+    // Page not live yet — close the hidden check window silently
+    chrome.storage.local.get("checkWindowId", ({ checkWindowId }) => {
+      if (checkWindowId) chrome.windows.remove(checkWindowId);
+    });
   }
 
   if (msg.type === "AUTO_BUY_TRIGGER") {
@@ -97,8 +105,10 @@ async function handleTicketsLive(teams, checkTabId) {
     setState({ buyerTabId: tab.id });
   });
 
-  // Close the background check tab
-  if (checkTabId) chrome.tabs.remove(checkTabId);
+  // Close the hidden check window
+  chrome.storage.local.get("checkWindowId", ({ checkWindowId }) => {
+    if (checkWindowId) chrome.windows.remove(checkWindowId);
+  });
 
   // Fire desktop notification
   chrome.notifications.create("ticketsLive", {

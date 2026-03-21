@@ -9,7 +9,8 @@
     "storage",
     "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "windows"
   ],
   "host_permissions": [
     "https://shop.royalchallengers.com/*",
