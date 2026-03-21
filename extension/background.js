@@ -20,54 +20,42 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Also check immediately on service worker startup
 checkPage();
 
-// ── Page check ───────────────────────────────────────────────────────────────
+// ── Page check (fetch only — no tabs opened during monitoring) ───────────────
 
 async function checkPage() {
   try {
     const res = await fetch(TARGET_URL, { cache: "no-store" });
     const html = await res.text();
 
-    // Tier 1: check raw HTML size + bundle hash change
     const bundleMatch = html.match(/\/assets\/index-([a-zA-Z0-9]+)\.js/);
     const bundleHash = bundleMatch ? bundleMatch[1] : null;
 
-    const { lastBundleHash, lastSize, ticketsLive } = await getState();
+    const { lastBundleHash, checkCount = 0, ticketsLive } = await getState();
+    if (ticketsLive) return; // already handling
 
     const sizeChanged = html.length > 10000;
-    const hashChanged = bundleHash && bundleHash !== lastBundleHash;
+    const hashChanged = bundleHash && lastBundleHash && bundleHash !== lastBundleHash;
 
-    if (lastBundleHash && hashChanged) {
-      console.log(`[RCB] Bundle hash changed: ${lastBundleHash} → ${bundleHash}`);
+    await setState({
+      lastBundleHash: bundleHash || lastBundleHash,
+      lastSize: html.length,
+      checkCount: checkCount + 1,
+      lastCheck: Date.now(),
+    });
+
+    if (hashChanged) {
+      console.log(`[RCB] Bundle hash changed: ${lastBundleHash} → ${bundleHash} — tickets may be live!`);
     }
 
-    await setState({ lastBundleHash: bundleHash || lastBundleHash, lastSize: html.length });
-
-    // Tier 2: open a background tab to let content script check rendered DOM
-    // Only do this every 5th check or when Tier 1 signals a change
-    const { checkCount = 0 } = await getState();
-    await setState({ checkCount: checkCount + 1 });
-
-    if (sizeChanged || hashChanged || checkCount % 5 === 0) {
-      openCheckTab();
+    // Signal detected: open the buying tab (content.js will confirm + buy)
+    if (sizeChanged || hashChanged) {
+      console.log("[RCB] Change detected, opening ticket tab...");
+      handleTicketsLive(["change detected"], null);
     }
 
   } catch (e) {
     console.error("[RCB] Check failed:", e);
   }
-}
-
-// Open the ticket page in a hidden minimized window so content.js can inspect the DOM
-// without interrupting the user's current browsing
-function openCheckTab() {
-  chrome.windows.create(
-    { url: TARGET_URL, state: "minimized", focused: false },
-    (win) => {
-      const tabId = win.tabs[0].id;
-      console.log("[RCB] Opened hidden check tab:", tabId, "in window:", win.id);
-      // Store window ID so we can close the whole window when done
-      setState({ checkWindowId: win.id });
-    }
-  );
 }
 
 // ── Messages from content.js ──────────────────────────────────────────────────
@@ -78,10 +66,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 
   if (msg.type === "CHECK_TAB_CLEAN") {
-    // Page not live yet — close the hidden check window silently
-    chrome.storage.local.get("checkWindowId", ({ checkWindowId }) => {
-      if (checkWindowId) chrome.windows.remove(checkWindowId);
-    });
+    // No-op: we no longer open check windows
   }
 
   if (msg.type === "AUTO_BUY_TRIGGER") {
@@ -105,10 +90,6 @@ async function handleTicketsLive(teams, checkTabId) {
     setState({ buyerTabId: tab.id });
   });
 
-  // Close the hidden check window
-  chrome.storage.local.get("checkWindowId", ({ checkWindowId }) => {
-    if (checkWindowId) chrome.windows.remove(checkWindowId);
-  });
 
   // Fire desktop notification
   chrome.notifications.create("ticketsLive", {
