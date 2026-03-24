@@ -64,12 +64,37 @@ async function autoBuy() {
 
 async function clickBuyTickets() {
   updateOverlay("🎟 Finding BUY TICKETS button...");
+
+  // First verify tickets are actually available (not just the merch "Buy Now")
+  const bodyText = document.body.innerText.toLowerCase();
+  if (bodyText.includes("tickets not available") || bodyText.includes("please await further")) {
+    throw new Error("Tickets not available yet — page says 'await further announcements'");
+  }
+
+  const teamsOnPage = TEAM_NAMES.filter((t) => bodyText.includes(t));
+  if (teamsOnPage.length === 0) {
+    throw new Error("No match listings found on page — tickets not live yet");
+  }
+
   const btn = await waitForElement(() => {
     const buttons = [...document.querySelectorAll("button, a")];
-    return buttons.find((b) =>
-      b.innerText.trim().toUpperCase().includes("BUY TICKET") ||
-      b.innerText.trim().toUpperCase().includes("BOOK NOW")
-    );
+    return buttons.find((b) => {
+      const text = b.innerText.trim().toUpperCase();
+      // Match ticket buy buttons, but NOT merchandise buttons
+      // Check that the button is near match/ticket content, not merch section
+      const isBuyBtn = text.includes("BUY TICKET") || text.includes("BOOK NOW") || text.includes("BUY NOW");
+      if (!isBuyBtn) return false;
+
+      // Exclude if the button is inside a merchandise section
+      const parent = b.closest("[class*='merch'], [class*='Merch'], [class*='merchandise']");
+      if (parent) return false;
+
+      // Exclude if nearby text says "merchandise"
+      const parentText = (b.parentElement?.innerText || "").toLowerCase();
+      if (parentText.includes("merchandise")) return false;
+
+      return true;
+    });
   }, 15000);
   btn.click();
   await delay(2000);
