@@ -21,6 +21,7 @@ load_dotenv()
 
 # --- Config ---
 TARGET_URL = os.getenv("TARGET_URL", "https://shop.royalchallengers.com/ticket")
+API_URL = os.getenv("API_URL", "https://rcbscaleapi.ticketgenie.in/ticket/eventlist/O")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 NOTIFICATION_COOLDOWN = 1800  # 30 minutes
 
@@ -122,6 +123,25 @@ def notify(subject: str, body: str, last_notified_at: float) -> float:
 
 
 # --- Detection functions ---
+
+def api_check() -> dict:
+    """Tier 0: Direct API check — fastest and most reliable."""
+    try:
+        resp = requests.get(API_URL, timeout=10)
+        data = resp.json()
+        events = data.get("result", [])
+        has_events = len(events) > 0
+        event_names = [e.get("eventName", e.get("name", "unknown")) for e in events]
+        return {
+            "has_events": has_events,
+            "event_count": len(events),
+            "event_names": event_names,
+            "raw": events[:3],  # first 3 for logging
+        }
+    except Exception as e:
+        log.error("API check failed: %s", e)
+        return {"has_events": False, "event_count": 0, "event_names": [], "raw": []}
+
 
 def quick_http_check(url: str, cycle: int) -> dict:
     """Tier 1: Quick HTTP check for content size and bundle changes."""
@@ -288,24 +308,38 @@ def main():
                 health_state["cycle"] = cycle
                 health_state["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-                # --- Tier 1: Quick HTTP check ---
-                http = quick_http_check(TARGET_URL, cycle)
-                log.info("Cycle %d | HTTP %d | Size: %d bytes | Bundle: %s",
-                         cycle, http["status_code"], http["content_length"],
-                         http["bundle_hash"])
+                detected = False
 
-                bundle_changed = (http["bundle_hash"] is not None and
-                                  http["bundle_hash"] != baseline_bundle_hash)
-                size_changed = http["content_length"] > 10000  # significant size increase
+                # --- Tier 0: API check (fastest, most reliable) ---
+                api = api_check()
+                if api["has_events"]:
+                    log.info("Cycle %d | API: %d events found! %s",
+                             cycle, api["event_count"], api["event_names"])
+                    detected = True
+                else:
+                    log.info("Cycle %d | API: no events yet", cycle)
 
-                if bundle_changed:
-                    log.info("JS bundle hash changed: %s -> %s",
-                             baseline_bundle_hash, http["bundle_hash"])
-                    baseline_bundle_hash = http["bundle_hash"]
+                # --- Tier 1: HTML check (fallback) ---
+                if not detected:
+                    http = quick_http_check(TARGET_URL, cycle)
+                    log.info("Cycle %d | HTTP %d | Size: %d bytes | Bundle: %s",
+                             cycle, http["status_code"], http["content_length"],
+                             http["bundle_hash"])
 
-                # --- Tier 2: Playwright (every 5th cycle or on change) ---
-                run_playwright = (cycle % 5 == 1) or bundle_changed or size_changed
-                if run_playwright:
+                    bundle_changed = (http["bundle_hash"] is not None and
+                                      http["bundle_hash"] != baseline_bundle_hash)
+                    size_changed = http["content_length"] > 10000
+
+                    if bundle_changed:
+                        log.info("JS bundle hash changed: %s -> %s",
+                                 baseline_bundle_hash, http["bundle_hash"])
+                        baseline_bundle_hash = http["bundle_hash"]
+
+                    if bundle_changed or size_changed:
+                        detected = True
+
+                # --- Tier 2: Playwright (every 10th cycle or on HTML change) ---
+                if not detected and (cycle % 10 == 1):
                     log.info("Running Playwright check...")
                     try:
                         pw_result = playwright_check(TARGET_URL, browser)
@@ -316,32 +350,11 @@ def main():
 
                         if baseline_content_hash is None:
                             baseline_content_hash = pw_result["content_hash"]
-                            log.info("Baseline content hash set: %s", baseline_content_hash)
 
                         if pw_result["has_tickets"]:
-                            log.info("TICKETS DETECTED! Teams found: %s", pw_result["teams_found"])
-                            if state != "live":
-                                subject = "RCB TICKETS ARE LIVE!"
-                                body = (
-                                    f"Tickets detected on {TARGET_URL}\n\n"
-                                    f"Teams found: {', '.join(pw_result['teams_found'])}\n"
-                                    f"Keywords found: {', '.join(pw_result['keywords_found'])}\n\n"
-                                    f"Page preview:\n{pw_result['body_text']}\n\n"
-                                    f"GO GO GO: {TARGET_URL}"
-                                )
-                                last_notified_at = notify(subject, body, last_notified_at)
-                                state = "live"
-                                health_state["page_state"] = "live"
-                        else:
-                            log.info("Page not live yet (no team names found)")
-                            if state == "live":
-                                log.info("State changed back to not_live")
-                                state = "not_live"
-                                health_state["page_state"] = "not_live"
-
+                            detected = True
                     except Exception as e:
                         log.error("Playwright check failed: %s", e)
-                        # Try to recover browser
                         try:
                             browser.close()
                         except Exception:
@@ -349,13 +362,30 @@ def main():
                         browser = pw.chromium.launch(headless=True)
                         log.info("Browser restarted")
 
+                # --- Notify if detected ---
+                if detected and state != "live":
+                    log.info("TICKETS DETECTED!")
+                    subject = "🏏 RCB TICKETS ARE LIVE!"
+                    body = (
+                        f"Tickets detected!\n\n"
+                        f"API events: {api['event_count']} — {', '.join(api['event_names'])}\n\n"
+                        f"GO GO GO: {TARGET_URL}"
+                    )
+                    last_notified_at = notify(subject, body, last_notified_at)
+                    state = "live"
+                    health_state["page_state"] = "live"
+                elif not detected and state == "live":
+                    log.info("State changed back to not_live")
+                    state = "not_live"
+                    health_state["page_state"] = "not_live"
+
                 consecutive_errors = 0
 
             except requests.exceptions.HTTPError as e:
                 consecutive_errors += 1
                 status = e.response.status_code if e.response else None
                 if status in (429, 403):
-                    current_interval = 300  # 5 min backoff
+                    current_interval = 300
                     log.warning("Rate limited (HTTP %s), backing off to 5 min", status)
                 else:
                     log.error("HTTP error: %s", e)

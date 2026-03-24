@@ -1,66 +1,93 @@
 const TARGET_URL = "https://shop.royalchallengers.com/ticket";
-const CHECK_INTERVAL_MINUTES = 1;
+const API_URL = "https://rcbscaleapi.ticketgenie.in/ticket/eventlist/O";
+const CHECK_INTERVAL_MS = 30000; // 30 seconds via setTimeout
 
 const TEAM_NAMES = [
   "chennai", "delhi", "gujarat", "kolkata",
   "lucknow", "mumbai", "punjab", "rajasthan", "hyderabad"
 ];
 
-// ── Alarm setup ──────────────────────────────────────────────────────────────
+// ── Polling loop (setTimeout for 30s, bypasses Chrome 1-min alarm limit) ─────
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create("ticketCheck", { periodInMinutes: CHECK_INTERVAL_MINUTES });
-  console.log("[RCB] Extension installed, alarm set.");
-});
+function scheduleNextCheck() {
+  setTimeout(() => checkPage(), CHECK_INTERVAL_MS);
+}
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "ticketCheck") checkPage();
-});
-
-// Also check immediately on service worker startup
+// Check immediately on service worker startup
 checkPage();
 
-// ── Page check (fetch only — no tabs opened during monitoring) ───────────────
+// ── Page check (API first, HTML fallback — no tabs opened) ───────────────────
 
 async function checkPage() {
   try {
-    const res = await fetch(TARGET_URL, { cache: "no-store" });
-    const html = await res.text();
-
-    const bundleMatch = html.match(/\/assets\/index-([a-zA-Z0-9]+)\.js/);
-    const bundleHash = bundleMatch ? bundleMatch[1] : null;
-
-    const { lastBundleHash, checkCount = 0, ticketsLive, liveDetectedAt } = await getState();
+    const { ticketsLive, liveDetectedAt } = await getState();
     // Clear stale live state (older than 30 min) so monitoring resumes
     if (ticketsLive && liveDetectedAt && (Date.now() - liveDetectedAt > 30 * 60 * 1000)) {
       await setState({ ticketsLive: false, liveDetectedAt: null });
     } else if (ticketsLive) {
-      return; // actively handling, skip check
+      scheduleNextCheck();
+      return;
     }
 
-    const sizeChanged = html.length > 10000;
-    const hashChanged = bundleHash && lastBundleHash && bundleHash !== lastBundleHash;
+    const { checkCount = 0 } = await getState();
+    let detected = false;
+    let detectedTeams = [];
 
-    await setState({
-      lastBundleHash: bundleHash || lastBundleHash,
-      lastSize: html.length,
-      checkCount: checkCount + 1,
-      lastCheck: Date.now(),
-    });
-
-    if (hashChanged) {
-      console.log(`[RCB] Bundle hash changed: ${lastBundleHash} → ${bundleHash} — tickets may be live!`);
+    // ── Signal 1: API check (fast, reliable) ──
+    try {
+      const apiRes = await fetch(API_URL, { cache: "no-store" });
+      const apiData = await apiRes.json();
+      if (apiData.status === "Success" && apiData.result && apiData.result.length > 0) {
+        console.log(`[RCB] API: ${apiData.result.length} events found!`, apiData.result);
+        detected = true;
+        detectedTeams = apiData.result.map(e => e.eventName || e.name || "event");
+      } else {
+        console.log(`[RCB] Cycle ${checkCount + 1} | API: no events yet`);
+      }
+    } catch (e) {
+      console.error("[RCB] API check failed:", e);
     }
 
-    // Signal detected: open the buying tab (content.js will confirm + buy)
-    if (sizeChanged || hashChanged) {
-      console.log("[RCB] Change detected, opening ticket tab...");
-      handleTicketsLive(["change detected"], null);
+    // ── Signal 2: HTML check (bundle hash + size change) ──
+    if (!detected) {
+      try {
+        const res = await fetch(TARGET_URL, { cache: "no-store" });
+        const html = await res.text();
+
+        const bundleMatch = html.match(/\/assets\/index-([a-zA-Z0-9]+)\.js/);
+        const bundleHash = bundleMatch ? bundleMatch[1] : null;
+        const { lastBundleHash } = await getState();
+
+        const sizeChanged = html.length > 10000;
+        const hashChanged = bundleHash && lastBundleHash && bundleHash !== lastBundleHash;
+
+        await setState({ lastBundleHash: bundleHash || lastBundleHash, lastSize: html.length });
+
+        if (hashChanged) {
+          console.log(`[RCB] Bundle hash changed: ${lastBundleHash} → ${bundleHash}`);
+        }
+
+        if (sizeChanged || hashChanged) {
+          detected = true;
+          detectedTeams = ["change detected via HTML"];
+        }
+      } catch (e) {
+        console.error("[RCB] HTML check failed:", e);
+      }
+    }
+
+    await setState({ checkCount: checkCount + 1, lastCheck: Date.now() });
+
+    if (detected) {
+      console.log("[RCB] TICKETS DETECTED! Opening tab...");
+      handleTicketsLive(detectedTeams, null);
     }
 
   } catch (e) {
     console.error("[RCB] Check failed:", e);
   }
+
+  scheduleNextCheck();
 }
 
 // ── Messages from content.js ──────────────────────────────────────────────────
