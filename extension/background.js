@@ -22,15 +22,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 async function checkPage() {
   try {
-    const { ticketsLive, liveDetectedAt } = await getState();
+    const state = await getState();
+    const { ticketsLive, liveDetectedAt, checkCount = 0 } = state;
     // Clear stale live state (older than 30 min) so monitoring resumes
     if (ticketsLive && liveDetectedAt && (Date.now() - liveDetectedAt > 30 * 60 * 1000)) {
       await setState({ ticketsLive: false, liveDetectedAt: null });
     } else if (ticketsLive) {
       return;
     }
-
-    const { checkCount = 0 } = await getState();
     let detected = false;
     let detectedTeams = [];
 
