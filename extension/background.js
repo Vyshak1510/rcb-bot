@@ -1,20 +1,22 @@
 const TARGET_URL = "https://shop.royalchallengers.com/ticket";
 const API_URL = "https://rcbscaleapi.ticketgenie.in/ticket/eventlist/O";
-const CHECK_INTERVAL_MS = 30000; // 30 seconds via setTimeout
 
 const TEAM_NAMES = [
   "chennai", "delhi", "gujarat", "kolkata",
   "lucknow", "mumbai", "punjab", "rajasthan", "hyderabad"
 ];
 
-// ── Polling loop (setTimeout for 30s, bypasses Chrome 1-min alarm limit) ─────
+// ── Polling via chrome.alarms (1-min, guaranteed by Chrome) ──────────────────
 
-function scheduleNextCheck() {
-  setTimeout(() => checkPage(), CHECK_INTERVAL_MS);
-}
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.alarms.create("ticketCheck", { periodInMinutes: 1 });
+  console.log("[RCB] Extension installed, alarm set for every 1 min.");
+  checkPage(); // immediate first check
+});
 
-// Check immediately on service worker startup
-checkPage();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "ticketCheck") checkPage();
+});
 
 // ── Page check (API first, HTML fallback — no tabs opened) ───────────────────
 
@@ -86,8 +88,6 @@ async function checkPage() {
   } catch (e) {
     console.error("[RCB] Check failed:", e);
   }
-
-  scheduleNextCheck();
 }
 
 // ── Messages from content.js ──────────────────────────────────────────────────
