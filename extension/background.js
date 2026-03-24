@@ -30,8 +30,13 @@ async function checkPage() {
     const bundleMatch = html.match(/\/assets\/index-([a-zA-Z0-9]+)\.js/);
     const bundleHash = bundleMatch ? bundleMatch[1] : null;
 
-    const { lastBundleHash, checkCount = 0, ticketsLive } = await getState();
-    if (ticketsLive) return; // already handling
+    const { lastBundleHash, checkCount = 0, ticketsLive, liveDetectedAt } = await getState();
+    // Clear stale live state (older than 30 min) so monitoring resumes
+    if (ticketsLive && liveDetectedAt && (Date.now() - liveDetectedAt > 30 * 60 * 1000)) {
+      await setState({ ticketsLive: false, liveDetectedAt: null });
+    } else if (ticketsLive) {
+      return; // actively handling, skip check
+    }
 
     const sizeChanged = html.length > 10000;
     const hashChanged = bundleHash && lastBundleHash && bundleHash !== lastBundleHash;
@@ -81,7 +86,7 @@ async function handleTicketsLive(teams, checkTabId) {
   const { ticketsLive } = await getState();
   if (ticketsLive) return; // already notified
 
-  await setState({ ticketsLive: true });
+  await setState({ ticketsLive: true, liveDetectedAt: Date.now() });
   console.log("[RCB] TICKETS LIVE! Teams:", teams);
 
   // Open the real ticket tab for buying

@@ -6,11 +6,13 @@ async function loadState() {
   const data = await chrome.storage.local.get(null);
   const settings = await new Promise((r) => chrome.storage.sync.get(null, r));
 
-  // Status card
-  const pageState = data.ticketsLive ? "LIVE 🟢" : "Not live yet 🔴";
+  // Status card — only show LIVE if ticketsLive was set recently (within 30 min)
+  // This prevents stale "LIVE" state from previous sessions
+  const isLive = data.ticketsLive && data.liveDetectedAt && (Date.now() - data.liveDetectedAt < 30 * 60 * 1000);
+  const pageState = isLive ? "LIVE 🟢" : "Not live yet 🔴";
   document.getElementById("pageState").textContent = pageState;
   document.getElementById("pageState").className =
-    "value " + (data.ticketsLive ? "live" : "not-live");
+    "value " + (isLive ? "live" : "not-live");
 
   document.getElementById("lastCheck").textContent =
     data.lastCheck ? new Date(data.lastCheck).toLocaleTimeString() : "—";
@@ -63,7 +65,7 @@ document.getElementById("openTabBtn").addEventListener("click", () => {
 document.getElementById("resetBtn").addEventListener("click", async () => {
   await new Promise((r) =>
     chrome.storage.local.remove(
-      ["ticketsLive", "checkCount", "lastCheck", "buyerTabId", "autoBuyEnabled"],
+      ["ticketsLive", "liveDetectedAt", "checkCount", "lastCheck", "buyerTabId", "autoBuyEnabled"],
       r
     )
   );
