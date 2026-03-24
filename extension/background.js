@@ -27,7 +27,6 @@ async function checkPage() {
     if (ticketsLive && liveDetectedAt && (Date.now() - liveDetectedAt > 30 * 60 * 1000)) {
       await setState({ ticketsLive: false, liveDetectedAt: null });
     } else if (ticketsLive) {
-      scheduleNextCheck();
       return;
     }
 
