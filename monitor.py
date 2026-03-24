@@ -261,7 +261,7 @@ def main():
     state = "not_live"
     last_notified_at = 0.0
     consecutive_errors = 0
-    baseline_bundle_hash = "ezSq5iyK"  # current known bundle hash
+    baseline_bundle_hash = "CVxj-Rr6"  # updated 2026-03-22
     baseline_content_hash = None
     cycle = 0
     running = True
