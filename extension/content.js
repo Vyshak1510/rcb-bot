@@ -171,34 +171,133 @@ function findStandElement(standName) {
 
 async function selectOptimalSeats() {
   updateOverlay("💺 Finding optimal seats...");
-  await delay(2000); // wait for seat map to render
+  await delay(3000); // wait for Konva seat map to render
 
-  // Try API-based seat selection first
-  const apiSuccess = await trySeatAPISelection();
+  // Strategy 1: Use Konva's internal API (React-Konva exposes the stage)
+  const konvaSuccess = await tryKonvaSeatSelection();
+  if (konvaSuccess) return;
+
+  // Strategy 2: Intercept network requests for seat data + simulate canvas clicks
+  const apiSuccess = await tryAPISeatSelection();
   if (apiSuccess) return;
 
-  // Fallback: click centre of canvas
-  await canvasCentreClick();
+  // Strategy 3: Fallback - click centre of canvas with proper Konva event simulation
+  await konvaCanvasFallback();
 }
 
-async function trySeatAPISelection() {
+// ── Strategy 1: Konva internal API ───────────────────────────────────────────
+
+async function tryKonvaSeatSelection() {
   try {
-    // Extract event/section IDs from current URL or page state
-    const url = new URL(window.location.href);
-    const pathParts = url.pathname.split("/").filter(Boolean);
+    // Konva stores all stages globally
+    const Konva = window.Konva;
+    if (!Konva || !Konva.stages || Konva.stages.length === 0) {
+      console.log("[RCB] Konva not found or no stages");
+      return false;
+    }
 
-    // Try to find seat data from XHR responses by intercepting fetch
-    // The seat map API returns rows/columns; we find the central available seat
-    const seats = await fetchAvailableSeats();
-    if (!seats || seats.length === 0) return false;
+    const stage = Konva.stages[0];
+    const allShapes = stage.find("Rect, Circle, Path, RegularPolygon");
+    console.log(`[RCB] Found ${allShapes.length} Konva shapes`);
 
-    const optimal = findCentralSeat(seats);
+    // Identify seat shapes: small, repeated shapes (not background/containers)
+    // Seats are typically uniform-sized small shapes
+    const shapeSizes = {};
+    allShapes.forEach((s) => {
+      const key = `${Math.round(s.width())}_${Math.round(s.height())}`;
+      shapeSizes[key] = (shapeSizes[key] || 0) + 1;
+    });
+
+    // The most common size is likely the seat shape
+    const seatSizeKey = Object.entries(shapeSizes)
+      .sort(([, a], [, b]) => b - a)[0]?.[0];
+
+    if (!seatSizeKey) return false;
+    const [seatW, seatH] = seatSizeKey.split("_").map(Number);
+    console.log(`[RCB] Seat size detected: ${seatW}x${seatH}`);
+
+    // Filter to seat-shaped elements
+    const seatShapes = allShapes.filter((s) => {
+      const w = Math.round(s.width());
+      const h = Math.round(s.height());
+      return w === seatW && h === seatH;
+    });
+
+    // Identify available seats by color (green/available, grey or red/taken)
+    // Available seats are usually green, blue, or have a lighter fill
+    // Taken seats are usually grey, red, or darker
+    const TAKEN_COLORS = ["#808080", "#999", "#ccc", "#ddd", "#eee", "#ff0000", "#f00",
+      "gray", "grey", "red", "#d3d3d3", "#a9a9a9"];
+    const available = seatShapes.filter((s) => {
+      const fill = (s.fill() || "").toLowerCase();
+      const listening = s.listening(); // disabled shapes are not listening
+      const visible = s.visible();
+      const isTaken = TAKEN_COLORS.some((c) => fill.includes(c));
+      return visible && listening && !isTaken && fill !== "";
+    });
+
+    console.log(`[RCB] Available seats: ${available.length} / ${seatShapes.length}`);
+    if (available.length === 0) return false;
+
+    // Find the most central seat (middle row + middle column)
+    const positions = available.map((s) => ({
+      shape: s,
+      x: s.absolutePosition().x,
+      y: s.absolutePosition().y,
+    }));
+
+    const minX = Math.min(...positions.map((p) => p.x));
+    const maxX = Math.max(...positions.map((p) => p.x));
+    const minY = Math.min(...positions.map((p) => p.y));
+    const maxY = Math.max(...positions.map((p) => p.y));
+    const midX = (minX + maxX) / 2;
+    const midY = (minY + maxY) / 2;
+
+    // Sort by distance from center
+    positions.sort((a, b) => {
+      const da = Math.hypot(a.x - midX, a.y - midY);
+      const db = Math.hypot(b.x - midX, b.y - midY);
+      return da - db;
+    });
+
+    // Click the most central seat
+    const best = positions[0];
+    updateOverlay(`💺 Clicking optimal seat at (${Math.round(best.x)}, ${Math.round(best.y)})...`);
+
+    // Fire Konva's internal click event
+    best.shape.fire("click", { evt: new MouseEvent("click") });
+    best.shape.fire("tap");
+    await delay(500);
+
+    // Verify seat was selected (shape might change color)
+    console.log(`[RCB] Clicked seat, fill is now: ${best.shape.fill()}`);
+    return true;
+
+  } catch (e) {
+    console.warn("[RCB] Konva seat selection failed:", e);
+    return false;
+  }
+}
+
+// ── Strategy 2: API-based seat data + canvas coordinate click ────────────────
+
+async function tryAPISeatSelection() {
+  try {
+    // Try to find seat data from intercepted network requests
+    // or from React component state via fiber tree
+    const seatData = await findSeatDataInReact();
+    if (!seatData || seatData.length === 0) return false;
+
+    const available = seatData.filter((s) =>
+      s.available || s.status === "available" || s.status === "AVAILABLE"
+    );
+    if (available.length === 0) return false;
+
+    const optimal = findCentralSeat(available);
     if (!optimal) return false;
 
     updateOverlay(`💺 Clicking seat Row ${optimal.row}, Seat ${optimal.col}...`);
-    await clickSeatOnCanvas(optimal);
-    await delay(500);
-
+    await clickSeatViaKonvaCoords(optimal);
     return true;
   } catch (e) {
     console.warn("[RCB] API seat selection failed:", e);
@@ -206,103 +305,142 @@ async function trySeatAPISelection() {
   }
 }
 
-async function fetchAvailableSeats() {
-  // Look for seat data already in the page (React state / window globals)
-  const scripts = [...document.querySelectorAll("script")];
-  // Try window.__SEATS__ or similar injected data
-  if (window.__SEAT_DATA__) return window.__SEAT_DATA__;
+function findSeatDataInReact() {
+  // Walk the React fiber tree to find seat data in component state/props
+  const root = document.getElementById("rcb-shop");
+  if (!root || !root._reactRootContainer && !root.__reactFiber$) return null;
 
-  // Try fetching from the API endpoint pattern we saw on the dev site
-  const sectionId = extractSectionId();
-  const eventId = extractEventId();
-  if (!sectionId || !eventId) return null;
+  // Try React 18 fiber
+  const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber$"));
+  if (!fiberKey) return null;
 
-  const apiBase = window.location.origin;
-  const resp = await fetch(`${apiBase}/api/v1/event/${eventId}/section/${sectionId}/seats`, {
-    credentials: "include",
-  });
-  if (!resp.ok) return null;
-  const data = await resp.json();
-  // Flatten to array of {row, col, available}
-  return (data.seats || data.rows || []).flat();
-}
+  const seats = [];
+  function walkFiber(fiber, depth = 0) {
+    if (!fiber || depth > 50) return;
+    const state = fiber.memoizedState;
+    const props = fiber.memoizedProps;
 
-function extractEventId() {
-  const match = window.location.href.match(/event[_/-]?id[=/-]?([a-zA-Z0-9]+)/i)
-    || document.cookie.match(/eventId=([^;]+)/);
-  return match ? match[1] : null;
-}
+    // Look for seat arrays in state or props
+    if (props?.seats) seats.push(...props.seats);
+    if (props?.seatData) seats.push(...props.seatData);
+    if (state?.seats) seats.push(...state.seats);
 
-function extractSectionId() {
-  // Look in URL, page data attributes, or React props
-  const el = document.querySelector("[data-section-id]");
-  if (el) return el.dataset.sectionId;
-  const match = window.location.href.match(/section[_/-]?id[=/-]?([a-zA-Z0-9]+)/i);
-  return match ? match[1] : null;
+    // Check for arrays that look like seat data
+    if (Array.isArray(props?.children)) {
+      props.children.forEach((c) => {
+        if (c?.props?.row !== undefined && c?.props?.col !== undefined) {
+          seats.push({ row: c.props.row, col: c.props.col, ...c.props });
+        }
+      });
+    }
+
+    walkFiber(fiber.child, depth + 1);
+    walkFiber(fiber.sibling, depth + 1);
+  }
+  walkFiber(root[fiberKey]);
+  return seats.length > 0 ? seats : null;
 }
 
 function findCentralSeat(seats) {
-  const available = seats.filter((s) => s.available || s.status === "available");
-  if (!available.length) return null;
-
-  // Find bounds
-  const rows = available.map((s) => s.row);
-  const cols = available.map((s) => s.col || s.seat || s.column);
+  if (!seats.length) return null;
+  const rows = seats.map((s) => s.row || s.y || 0);
+  const cols = seats.map((s) => s.col || s.seat || s.column || s.x || 0);
   const midRow = (Math.min(...rows) + Math.max(...rows)) / 2;
   const midCol = (Math.min(...cols) + Math.max(...cols)) / 2;
 
-  // Sort by distance from centre, pick closest
-  available.sort((a, b) => {
-    const da = Math.hypot(a.row - midRow, (a.col || a.seat || a.column) - midCol);
-    const db = Math.hypot(b.row - midRow, (b.col || b.seat || b.column) - midCol);
-    return da - db;
+  seats.sort((a, b) => {
+    const ar = a.row || a.y || 0, ac = a.col || a.seat || a.column || a.x || 0;
+    const br = b.row || b.y || 0, bc = b.col || b.seat || b.column || b.x || 0;
+    return Math.hypot(ar - midRow, ac - midCol) - Math.hypot(br - midRow, bc - midCol);
   });
-
-  return available[0];
+  return seats[0];
 }
 
-async function clickSeatOnCanvas(seat) {
-  const canvas = document.querySelector("canvas");
-  if (!canvas) return;
+async function clickSeatViaKonvaCoords(seat) {
+  const Konva = window.Konva;
+  if (!Konva || !Konva.stages[0]) return;
 
-  const rect = canvas.getBoundingClientRect();
+  const stage = Konva.stages[0];
+  const stagePos = stage.container().getBoundingClientRect();
 
-  // Normalise seat position to canvas pixel coords
-  // Assume seat row/col are 1-indexed; scale to canvas size
-  const allSeats = await fetchAvailableSeats() || [];
-  const maxRow = Math.max(...allSeats.map((s) => s.row), 1);
-  const maxCol = Math.max(...allSeats.map((s) => s.col || s.seat || s.column), 1);
+  // Convert seat row/col to stage coordinates
+  // Find shapes near the expected position
+  const allShapes = stage.find("Rect, Circle");
+  const target = allShapes.reduce((closest, s) => {
+    if (!s.visible() || !s.listening()) return closest;
+    const pos = s.absolutePosition();
+    const dist = Math.hypot(pos.x - (seat.x || 0), pos.y - (seat.y || 0));
+    return dist < (closest?.dist || Infinity) ? { shape: s, dist } : closest;
+  }, null);
 
-  const x = rect.left + (seat.col / maxCol) * rect.width;
-  const y = rect.top + (seat.row / maxRow) * rect.height;
-
-  for (const evtType of ["mousedown", "mouseup", "click"]) {
-    canvas.dispatchEvent(new MouseEvent(evtType, {
-      bubbles: true, cancelable: true,
-      clientX: x, clientY: y,
-    }));
-    await delay(100);
+  if (target?.shape) {
+    target.shape.fire("click", { evt: new MouseEvent("click") });
+    target.shape.fire("tap");
   }
 }
 
-async function canvasCentreClick() {
-  updateOverlay("💺 Clicking canvas centre (fallback)...");
+// ── Strategy 3: Fallback canvas click ────────────────────────────────────────
+
+async function konvaCanvasFallback() {
+  updateOverlay("💺 Trying canvas click fallback...");
+  const Konva = window.Konva;
+
+  if (Konva && Konva.stages[0]) {
+    // Use Konva's getIntersection to find clickable shapes near centre
+    const stage = Konva.stages[0];
+    const w = stage.width();
+    const h = stage.height();
+
+    // Spiral outward from centre to find a clickable seat
+    const cx = w / 2, cy = h / 2;
+    for (let r = 0; r < Math.max(w, h) / 2; r += 10) {
+      for (let angle = 0; angle < 360; angle += 15) {
+        const px = cx + r * Math.cos(angle * Math.PI / 180);
+        const py = cy + r * Math.sin(angle * Math.PI / 180);
+        const shape = stage.getIntersection({ x: px, y: py });
+        if (shape && shape.listening() && shape.visible()) {
+          updateOverlay(`💺 Found seat at (${Math.round(px)}, ${Math.round(py)})`);
+          shape.fire("click", { evt: new MouseEvent("click") });
+          shape.fire("tap");
+          await delay(300);
+
+          // Check if it was selected (look for UI change)
+          const proceedBtn = [...document.querySelectorAll("button")].find((b) =>
+            /proceed|pay|checkout|confirm/i.test(b.innerText.trim())
+          );
+          if (proceedBtn && !proceedBtn.disabled) return;
+        }
+      }
+    }
+  }
+
+  // Last resort: raw DOM canvas events
   const canvas = document.querySelector("canvas");
   if (!canvas) {
     updateOverlay("⚠️ No seat map found — please select seats manually");
     return;
   }
-  const rect = canvas.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
 
-  for (const evtType of ["mousedown", "mouseup", "click"]) {
-    canvas.dispatchEvent(new MouseEvent(evtType, {
-      bubbles: true, cancelable: true,
-      clientX: cx, clientY: cy,
-    }));
-    await delay(100);
-  }
+  updateOverlay("⚠️ Couldn't auto-select seats. Please pick manually, bot will handle the rest.");
+  // Wait for user to select seats manually, then proceed
+  await waitForManualSeatSelection();
+}
+
+async function waitForManualSeatSelection() {
+  return new Promise((resolve) => {
+    const check = setInterval(() => {
+      const btn = [...document.querySelectorAll("button")].find((b) =>
+        /proceed|pay|checkout|confirm/i.test(b.innerText.trim())
+        && !b.disabled
+      );
+      if (btn) {
+        clearInterval(check);
+        resolve();
+      }
+    }, 1000);
+    // Timeout after 5 minutes
+    setTimeout(() => { clearInterval(check); resolve(); }, 300000);
+  });
 }
 
 async function clickProceed() {
